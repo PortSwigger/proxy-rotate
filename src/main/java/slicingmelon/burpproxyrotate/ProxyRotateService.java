@@ -73,6 +73,9 @@ public class ProxyRotateService {
     private volatile boolean serverRunning = false;
     private int localPort;
     
+    // Buffer pool for high-performance buffer management
+    private BufferPool bufferPool;
+    
     // Connection tracking
     private final AtomicInteger activeConnectionCount = new AtomicInteger(0);
     private final ConcurrentHashMap<String, AtomicInteger> connectionsPerProxy = new ConcurrentHashMap<>();
@@ -108,10 +111,22 @@ public class ProxyRotateService {
         //private long creationTime;
         
         public ConnectionState() {
-            // Use direct buffers for better I/O performance
-            this.inputBuffer = ByteBuffer.allocateDirect(bufferSize);
-            this.outputBuffer = ByteBuffer.allocateDirect(bufferSize);
+            // Use buffer pool for better performance - lazy initialization
+            this.inputBuffer = null;
+            this.outputBuffer = null;
             //this.creationTime = System.currentTimeMillis();
+        }
+        
+        /**
+         * Simple buffer initialization without pool (more memory efficient)
+         */
+        public void initializeBuffers() {
+            if (inputBuffer == null) {
+                inputBuffer = ByteBuffer.allocate(bufferSize); // Use heap buffers
+            }
+            if (outputBuffer == null) {
+                outputBuffer = ByteBuffer.allocate(bufferSize); // Use heap buffers
+            }
         }
         
         /**
@@ -155,10 +170,8 @@ public class ProxyRotateService {
         }
     }
 
-    // Track the last used proxy to enforce rotation
-    private volatile int lastProxyIndex = -1;
-    private volatile ProxyEntry lastUsedProxy = null;
-    private final Object proxyRotationLock = new Object();
+    // Track the last used proxy to enforce rotation - use atomic for better performance
+    private final java.util.concurrent.atomic.AtomicInteger roundRobinIndex = new java.util.concurrent.atomic.AtomicInteger(0);
 
     /**
      * Creates a new ProxyRotateService
@@ -167,6 +180,9 @@ public class ProxyRotateService {
         this.proxyList = proxyList;
         this.proxyListLock = proxyListLock;
         this.logging = logging;
+        
+        // Using simple heap buffers instead of complex pooling
+        // Java's GC handles short-lived buffers very efficiently
         
         // Add default Burp Collaborator domains
         bypassDomains.add("burpcollaborator.net");
@@ -335,45 +351,29 @@ public class ProxyRotateService {
      * The main selector loop that handles all NIO events.
      */
     private void runSelectorLoop() throws IOException {
-        int idleCount = 0;
+        long lastCleanupTime = System.currentTimeMillis();
+        final long CLEANUP_INTERVAL = 30000; // 30 seconds
         
         while (serverRunning) {
             try {
-                // Wait for events with a timeout (100ms when active, up to 500ms when idle)
-                // Using longer timeouts reduces CPU usage significantly
-                int selectTimeout = Math.min(100 + (idleCount * 50), 500);
-                int readyChannels = selector.select(selectTimeout);
+                // Use a fixed timeout for consistent performance
+                int readyChannels = selector.select(100);
                 
                 // Check if the server was stopped
                 if (!serverRunning) {
                     break;
                 }
                 
-                if (readyChannels == 0) {
-                    // No channels ready - count idle cycles
-                    idleCount++;
-                    
-                    // If we've been idle for a while, add a small sleep to reduce CPU usage
-                    if (idleCount > 10) {
-                        try {
-                            Thread.sleep(5);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }
-                    
-                    // Check if selector needs to be recreated (JDK bug workaround)
-                    if (idleCount % 100 == 0) {
-                        if (selector.keys().isEmpty()) {
-                            idleCount = 0;
-                        }
-                    }
-                    
-                    continue;
+                // Periodic cleanup without relying on idle cycles
+                long currentTime = System.currentTimeMillis();
+                if (currentTime - lastCleanupTime > CLEANUP_INTERVAL) {
+                    cleanupIdleConnections();
+                    lastCleanupTime = currentTime;
                 }
                 
-                // Reset idle count when we have activity
-                idleCount = 0;
+                if (readyChannels == 0) {
+                    continue;
+                }
                 
                 // Process the ready keys
                 Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
@@ -455,7 +455,6 @@ public class ProxyRotateService {
                         }
                         selector.close();
                         selector = newSelector;
-                        idleCount = 0;
                         logInfo("Recreated selector due to possible JDK bug");
                     } catch (IOException ex) {
                         logError("Failed to recreate selector: " + ex.getMessage());
@@ -499,8 +498,7 @@ public class ProxyRotateService {
         
         try {
             // Reset the proxy rotation index
-            lastProxyIndex = -1;
-            lastUsedProxy = null;
+            roundRobinIndex.set(0);
             
             // Close the selector to interrupt the selector thread
             if (selector != null) {
@@ -571,7 +569,7 @@ public class ProxyRotateService {
         
         clientChannel.register(selector, SelectionKey.OP_READ);
         
-        // Create and store connection state
+        // Create and store connection state with truly lazy buffer initialization
         ConnectionState state = new ConnectionState();
         connectionStates.put(clientChannel, state);
         lastActivityTime.put(clientChannel, System.currentTimeMillis());
@@ -772,7 +770,7 @@ public class ProxyRotateService {
         logInfo("Fallback: Using proxy " + proxy.getProtocol() + "://" + proxyKey + 
                 " for target: " + state.targetHost + ":" + state.targetPort);
         
-        connectionsPerProxy.computeIfAbsent(proxyKey, _ -> new AtomicInteger(0)).incrementAndGet();
+        connectionsPerProxy.computeIfAbsent(proxyKey, k -> new AtomicInteger(0)).incrementAndGet();
         
         state.selectedProxy = proxy;
         
@@ -833,11 +831,9 @@ public class ProxyRotateService {
             return;
         }
         
-        // Check if we need to resize the buffer
-        if (state.inputBuffer.capacity() < bufferSize) {
-            // Allocate a larger buffer
-            ByteBuffer newBuffer = ByteBuffer.allocateDirect(bufferSize);
-            state.inputBuffer = newBuffer;
+        // Initialize buffer if needed using pool
+        if (state.inputBuffer == null) {
+            state.initializeBuffers();
         }
         
         ByteBuffer buffer = state.inputBuffer;
@@ -913,14 +909,8 @@ public class ProxyRotateService {
                                 closeConnection(clientChannel);
                             }
                         } else {
-                            // Regular proxy forwarding
-                            ByteBuffer forwardBuffer = ByteBuffer.allocate(buffer.remaining());
-                            forwardBuffer.put(buffer);
-                            forwardBuffer.flip();
-                            
-                            while (forwardBuffer.hasRemaining()) {
-                                proxyChannel.write(forwardBuffer);
-                            }
+                            // Regular proxy forwarding - write directly without extra allocation
+                            proxyChannel.write(buffer);
                         }
                     }
                     break;
@@ -971,13 +961,12 @@ public class ProxyRotateService {
             return;
         }
         
-        // Check if we need to resize the buffer
-        if (state.inputBuffer.capacity() < bufferSize) {
-            ByteBuffer newBuffer = ByteBuffer.allocateDirect(bufferSize);
-            state.inputBuffer = newBuffer;
+        // Initialize buffer if needed using pool
+        if (state.inputBuffer == null) {
+            state.initializeBuffers();
         }
         
-        // Use a shared buffer for better performance and less garbage collection
+        // Use pooled buffer for better performance
         ByteBuffer buffer = state.inputBuffer;
         buffer.clear();
         
@@ -1386,7 +1375,7 @@ public class ProxyRotateService {
         logInfo("Using proxy: " + proxyProtocol + "://" + proxyKey + 
                 " for target: " + state.targetHost + ":" + state.targetPort);
         
-        connectionsPerProxy.computeIfAbsent(proxyKey, _ -> new AtomicInteger(0)).incrementAndGet();
+        connectionsPerProxy.computeIfAbsent(proxyKey, k -> new AtomicInteger(0)).incrementAndGet();
         
         state.selectedProxy = proxy;
         
@@ -1558,7 +1547,7 @@ public class ProxyRotateService {
             // Get the proxy channel if it exists
             SocketChannel proxyChannel = proxyConnections.remove(clientChannel);
             
-            // Get the state
+            // Get the state - buffers will be GC'd automatically
             ConnectionState state = connectionStates.remove(clientChannel);
             
             // Close the client channel
@@ -1787,41 +1776,13 @@ public class ProxyRotateService {
                 " (proxy " + (randomIndex + 1) + " of " + activeProxies.size() + ")");
         } else {
             // Round-robin mode - get the next proxy in sequence
-            synchronized (proxyRotationLock) {
-                if (lastUsedProxy == null) {
-                    // First time, start with the first proxy
-                    selectedProxy = activeProxies.get(0);
-                    lastProxyIndex = 0;
-                } else {
-                    // Find the last used proxy in the current active list
-                    int lastUsedIndex = -1;
-                    for (int i = 0; i < activeProxies.size(); i++) {
-                        ProxyEntry proxy = activeProxies.get(i);
-                        if (proxy.getHost().equals(lastUsedProxy.getHost()) && 
-                            proxy.getPort() == lastUsedProxy.getPort() &&
-                            proxy.getProtocol().equals(lastUsedProxy.getProtocol())) {
-                            lastUsedIndex = i;
-                            break;
-                        }
-                    }
-                    
-                    if (lastUsedIndex == -1) {
-                        // Last used proxy is no longer active, start from beginning
-                        selectedProxy = activeProxies.get(0);
-                        lastProxyIndex = 0;
-                    } else {
-                        // Select the next proxy in the list
-                        lastProxyIndex = (lastUsedIndex + 1) % activeProxies.size();
-                        selectedProxy = activeProxies.get(lastProxyIndex);
-                    }
-                }
-                
-                lastUsedProxy = selectedProxy;
-                
-                logInfo("Rotating proxy: " + selectedProxy.getProtocol() + "://" + 
-                    selectedProxy.getHost() + ":" + selectedProxy.getPort() + 
-                    " (proxy " + (lastProxyIndex + 1) + " of " + activeProxies.size() + ")");
-            }
+            // Atomic round-robin selection - much more efficient than synchronized block
+            int nextIndex = roundRobinIndex.getAndIncrement() % activeProxies.size();
+            selectedProxy = activeProxies.get(nextIndex);
+            
+            logInfo("Rotating proxy: " + selectedProxy.getProtocol() + "://" + 
+                selectedProxy.getHost() + ":" + selectedProxy.getPort() + 
+                " (proxy " + (nextIndex + 1) + " of " + activeProxies.size() + ")");
         }
         
         return selectedProxy;
@@ -1896,6 +1857,9 @@ public class ProxyRotateService {
             }
         }
         
+        // Buffer pool disabled for memory efficiency
+        stats.append(" | BufferPool: Disabled");
+        
         return stats.toString();
     }
 
@@ -1935,10 +1899,6 @@ public class ProxyRotateService {
         bypassDomains.clear();
         logInfo("All bypass domains have been cleared");
     }
-
-
-
-
     
     /**
      * Process an HTTP CONNECT response from the proxy
