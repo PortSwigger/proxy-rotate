@@ -1,0 +1,13 @@
+Uuid: e50efd0778ac492eacf20271512a202f
+ExtensionType: 1
+Name: Proxy Rotate
+RepoName: proxy-rotate
+ScreenVersion: 1.0.0
+SerialVersion: 1
+MinPlatformVersion: 26
+ProOnly: False
+Author: slicingmelon
+ShortDescription: Routes each HTTP request from Burp through a random proxy from a list, enabling IP rotation for better anonymity, WAF evasion, and geo-targeted testing. Supports multiple proxy protocols.
+EntryPoint: target_repo-1.0.jar
+BuildCommand: ./gradlew clean build test
+SupportedProducts: Pro, Community
