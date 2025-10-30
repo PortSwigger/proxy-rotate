@@ -1,50 +1,31 @@
-<p>Burp Proxy Rotate is a Burp Suite extension that routes each HTTP request through a random proxy from a configurable list. Each new connection from Burp is assigned a proxy, enabling IP rotation for better anonymity, WAF evasion, geo-targeted testing, and other advanced use cases. This ensures requests exit through different IPs and can help simulate distributed attack patterns during security assessments.</p>
+<p>
+    Burp Proxy Rotate routes each HTTP request through a different proxy from a configurable list. Each new connection
+    is assigned a proxy on a per-connection basis, enabling IP rotation for improved anonymity, WAF evasion,
+    geo-targeted testing, and simulating distributed attack patterns during security assessments.
+</p>
 
 <h2>Features</h2>
-
 <ul>
-<li><strong>Advanced Proxy Rotation:</strong> Leverages Java NIO for non-blocking, event-driven proxying, assigning a different proxy node on a per-connection basis.</li>
-<li><strong>Multiple Protocol Support:</strong>
-<ul>
-<li><strong>SOCKS5:</strong> Full support, including username/password authentication.</li>
-<li><strong>SOCKS4 & SOCKS4a:</strong> Full support.</li>
-<li><strong>HTTP Proxies:</strong> Supports HTTP <code class=InlineCode>CONNECT</code> tunneling, including Basic authentication.</li>
-<li><strong>Direct Connections:</strong> Ability to bypass proxies for specified domains (e.g., Burp Collaborator).</li>
-</ul></li>
-<li><strong>Authentication:</strong> Supports SOCKS5 username/password and HTTP Basic proxy authentication.</li>
-<li><strong>Support for Bypass Domains:</strong>
-<ul>
-<li>Pre-configured to bypass Burp Collaborator domains (<code class=InlineCode>burpcollaborator.net</code>, <code class=InlineCode>oastify.com</code>).</li>
-<li>Supports adding custom domains to the bypass list.</li>
-</ul></li>
-<li><strong>Proxy List:</strong>
-<ul>
-<li>Add proxies individually or in bulk.</li>
-<li>Formats supported: <code class=InlineCode>protocol://host:port</code> and <code class=InlineCode>protocol://user:pass@host:port</code>.</li>
-<li>Validate individual or all proxies to exclude unresponsive proxies.</li>
-<li>Easy to manage the proxy list through the UI.</li>
-</ul></li>
-<li><strong>Internal Proxy Service Control:</strong>
-<ul>
-<li>Configure local listening port (manual or random).</li>
-<li>Adjust buffer sizes, idle timeouts, and maximum connections per proxy.</li>
-<li>Choose between Round-Robin or Random proxy selection strategies.</li>
-</ul></li>
-<li><strong>Detailed Logging & Status:</strong> Real-time logging and connection statistics.</li>
+    <li>Automatic proxy rotation on a per-connection basis using Java NIO for non-blocking, event-driven proxying</li>
+    <li>Support for SOCKS5, SOCKS4, SOCKS4a, and HTTP CONNECT proxies</li>
+    <li>Authentication support for SOCKS5 username/password and HTTP Basic authentication</li>
+    <li>Direct connection bypass for specified domains (pre-configured for Burp Collaborator and customizable)</li>
+    <li>Bulk proxy management with validation to identify and exclude unresponsive proxies</li>
+    <li>Configurable proxy selection strategies (Round-Robin or Random)</li>
+    <li>Adjustable buffer sizes, idle timeouts, and connection limits per proxy</li>
+    <li>Real-time connection statistics and detailed logging</li>
 </ul>
 
 <h2>Usage</h2>
-
-<ul>
-<li>Install/Build:
-<ul>
-<li>Grab a precompiled JAR from the <code class=InlineCode>build/libs</code> folder. </li>
-<li>Configure Proxies:</li>
-<li>Navigate to the Proxy Rotate tab in Burp Suite.</li>
-<li>Use the Single Proxy or Bulk Add options to add your SOCKS4, SOCKS5, or HTTP proxies.
-<ul>
-<li><strong>Format:</strong> <code class=InlineCode>protocol://host:port</code> (e.g., <code class=InlineCode>socks5://127.0.0.1:1080</code>)</li>
-<li><strong>Authenticated Format:</strong> <code class=InlineCode>protocol://username:password@host:port</code> (authentication information included).</li>
-</ul></li>
-</ul></li>
-</ul>
+<ol>
+    <li>Navigate to the Proxy Rotate tab</li>
+    <li>Add proxies using Single Proxy or Bulk Add options with formats <code
+            class="InlineCode">protocol://host:port</code> or <code
+            class="InlineCode">protocol://user:pass@host:port</code> (e.g., <code
+            class="InlineCode">socks5://127.0.0.1:1080</code> or <code
+            class="InlineCode">http://user:pass@proxy.example.com:8080</code>)</li>
+    <li>Click Validate All to check proxy status and exclude inactive proxies</li>
+    <li>Click Enable Proxy Rotate to start the service</li>
+    <li>Configure optional settings including buffer size, idle timeout, bypass domains, and proxy selection mode in the
+        Settings tab</li>
+</ol>

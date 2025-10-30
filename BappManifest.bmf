@@ -7,7 +7,7 @@ SerialVersion: 6
 MinPlatformVersion: 26
 ProOnly: False
 Author: slicingmelon
-ShortDescription: Routes each HTTP request from Burp through a random proxy from a list, enabling IP rotation for better anonymity, WAF evasion, and geo-targeted testing. Supports multiple proxy protocols.
+ShortDescription: Routes each HTTP request from Burp through a random proxy from a list.
 EntryPoint: target_repo-1.0.jar
-BuildCommand: ./gradlew clean build test
+BuildCommand: ./gradlew clean build
 SupportedProducts: Pro, Community
