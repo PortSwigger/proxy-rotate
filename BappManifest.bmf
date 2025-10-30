@@ -3,7 +3,7 @@ ExtensionType: 1
 Name: Proxy Rotate
 RepoName: proxy-rotate
 ScreenVersion: 1.0.0
-SerialVersion: 4
+SerialVersion: 5
 MinPlatformVersion: 26
 ProOnly: False
 Author: slicingmelon
