@@ -27,6 +27,7 @@ import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -70,11 +71,17 @@ public class ProxyRotateService {
     private Selector selector;
     private ServerSocketChannel serverChannel;
     private ExecutorService selectorThreadPool;
+    private ScheduledExecutorService cleanupScheduler;
     private volatile boolean serverRunning = false;
     private int localPort;
     
+    // Service identifier for distinguishing multiple instances
+    private String serviceId = "Main";
+    // Bind host (default all interfaces)
+    private String bindHost = "0.0.0.0";
+    
     // Buffer pool for high-performance buffer management
-    private BufferPool bufferPool;
+    //private BufferPool bufferPool;
     
     // Connection tracking
     private final AtomicInteger activeConnectionCount = new AtomicInteger(0);
@@ -261,7 +268,7 @@ public class ProxyRotateService {
      */
     public void start(int port, Runnable onSuccess, Consumer<String> onFailure) {
         if (serverRunning) {
-            logInfo("Service is already running.");
+            logInfo("[" + serviceId + "] Service is already running.");
             return;
         }
 
@@ -274,21 +281,40 @@ public class ProxyRotateService {
             serverChannel = ServerSocketChannel.open();
             serverChannel.configureBlocking(false);
             
-            // Set socket options
+            // Set socket options BEFORE binding
             serverChannel.socket().setReuseAddress(true);
             
-            // Increase accept backlog to handle connection surges
-            // This helps during high-volume connection establishment
-            serverChannel.socket().bind(new InetSocketAddress(localPort), 1000);
+            // Bind to the specified port on all interfaces
+            InetSocketAddress bindAddress = new InetSocketAddress(bindHost, localPort);
+            serverChannel.socket().bind(bindAddress, 1000);
+            
+            // Verify the socket is actually bound
+            if (!serverChannel.socket().isBound()) {
+                if (logging != null) {
+                    logging.logToError("[" + serviceId + "] Socket failed to bind to port " + localPort);
+                }
+                throw new IOException("Socket failed to bind to port " + localPort);
+            }
+            
+            int actualPort = serverChannel.socket().getLocalPort();
+            if (actualPort != localPort) {
+                if (logging != null) {
+                    logging.logToError("[" + serviceId + "] Socket bound to wrong port: expected " + localPort + ", got " + actualPort);
+                }
+                throw new IOException("Socket bound to wrong port: expected " + localPort + ", got " + actualPort);
+            }
+            
+            logInfo("[" + serviceId + "] Socket successfully bound to port " + actualPort);
             
             // Register the server channel for accept operations
             serverChannel.register(selector, SelectionKey.OP_ACCEPT);
             
             // Create a dedicated thread pool for the selector loop
+            final String threadPrefix = "ProxyRotate-" + serviceId;
             selectorThreadPool = Executors.newSingleThreadExecutor(new ThreadFactory() {
                 @Override
                 public Thread newThread(Runnable r) {
-                    Thread t = new Thread(r, "SocksProxy-Selector");
+                    Thread t = new Thread(r, threadPrefix + "-Selector");
                     t.setDaemon(true);
                     
                     // Set higher priority for the selector thread
@@ -298,33 +324,50 @@ public class ProxyRotateService {
             });
             
             // Create a scheduled thread for idle connection cleanup
-            final java.util.concurrent.ScheduledExecutorService cleanupScheduler = 
-                Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-                    @Override
-                    public Thread newThread(Runnable r) {
-                        Thread t = new Thread(r, "SocksProxy-Cleanup");
-                        t.setDaemon(true);
-                        
-                        // Lower priority for cleanup thread
-                        t.setPriority(Thread.MIN_PRIORITY);
-                        return t;
-                    }
-                });
+            cleanupScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, threadPrefix + "-Cleanup");
+                    t.setDaemon(true);
+                    
+                    // Lower priority for cleanup thread
+                    t.setPriority(Thread.MIN_PRIORITY);
+                    return t;
+                }
+            });
             
             serverRunning = true;
             
             // Start the main selector loop
             selectorThreadPool.submit(() -> {
                 try {
+                    // Verify socket is still bound before starting loop
+                    if (serverChannel == null || !serverChannel.isOpen() || !serverChannel.socket().isBound()) {
+                        logError("[" + serviceId + "] Server channel closed before selector loop started!");
+                        serverRunning = false;
+                        return;
+                    }
+                    logInfo("[" + serviceId + "] Selector loop starting, channel is open and bound");
                     runSelectorLoop();
                 } catch (Exception e) {
-                    logError("Error in selector loop: " + e.getMessage());
+                    logError("[" + serviceId + "] Error in selector loop: " + e.getClass().getName() + " - " + e.getMessage());
+                    e.printStackTrace();
                     serverRunning = false;
-                    onFailure.accept("Selector error: " + e.getMessage());
+                } finally {
+                    logInfo("[" + serviceId + "] Selector loop exited");
                 }
             });
             
-            // Start cleanup thread - run every 30 seconds (will add UI setting)
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+            
+            if (!serverRunning || serverChannel == null || !serverChannel.isOpen()) {
+                throw new IOException("Service failed to start properly - selector loop exited");
+            }
+            
             cleanupScheduler.scheduleAtFixedRate(() -> {
                 try {
                     if (serverRunning) {
@@ -333,16 +376,35 @@ public class ProxyRotateService {
                         cleanupScheduler.shutdown();
                     }
                 } catch (Exception e) {
-                    logError("Error in cleanup thread: " + e.getMessage());
+                    logError("[" + serviceId + "] Error in cleanup thread: " + e.getMessage());
                 }
             }, 30, 30, TimeUnit.SECONDS);
             
-            logInfo("Burp Proxy Rotate service started on localhost:" + localPort + " (NIO mode)");
+            logInfo("[" + serviceId + "] Proxy Rotate service started on 0.0.0.0:" + localPort + " (NIO mode)");
             onSuccess.run();
             
         } catch (IOException e) {
-            logError("Error starting service: " + e.getMessage());
+            logError("[" + serviceId + "] Error starting service: " + e.getMessage());
             serverRunning = false;
+            // Clean up any partially initialized resources
+            try {
+                if (selectorThreadPool != null) {
+                    selectorThreadPool.shutdownNow();
+                }
+                if (cleanupScheduler != null) {
+                    cleanupScheduler.shutdownNow();
+                }
+                if (serverChannel != null && serverChannel.isOpen()) {
+                    serverChannel.close();
+                }
+                if (selector != null && selector.isOpen()) {
+                    selector.close();
+                }
+            } catch (IOException cleanupEx) {
+                logError("[" + serviceId + "] Error cleaning up: " + cleanupEx.getMessage());
+            }
+            selectorThreadPool = null;
+            cleanupScheduler = null;
             onFailure.accept(e.getMessage());
         }
     }
@@ -353,6 +415,9 @@ public class ProxyRotateService {
     private void runSelectorLoop() throws IOException {
         long lastCleanupTime = System.currentTimeMillis();
         final long CLEANUP_INTERVAL = 30000; // 30 seconds
+        
+        logInfo("[" + serviceId + "] Entering selector loop, serverRunning=" + serverRunning);
+        logInfo("[" + serviceId + "] Selector keys: " + (selector != null ? selector.keys().size() : "null"));
         
         while (serverRunning) {
             try {
@@ -520,6 +585,15 @@ public class ProxyRotateService {
                 }
             }
             
+            // Shutdown cleanup scheduler
+            if (cleanupScheduler != null) {
+                cleanupScheduler.shutdown();
+                cleanupScheduler.awaitTermination(5, TimeUnit.SECONDS);
+                if (!cleanupScheduler.isTerminated()) {
+                    cleanupScheduler.shutdownNow();
+                }
+            }
+            
             // Close all active connections
             synchronized (connectionStates) {
                 for (SocketChannel channel : new ArrayList<>(connectionStates.keySet())) {
@@ -550,6 +624,7 @@ public class ProxyRotateService {
             selector = null;
             serverChannel = null;
             selectorThreadPool = null;
+            cleanupScheduler = null;
         }
         
         logInfo("Burp SOCKS Rotate server stopped.");
@@ -1796,6 +1871,34 @@ public class ProxyRotateService {
             this.loggingEnabled = enabled;
             logInfo("Logging " + (enabled ? "enabled" : "disabled"));
         }
+    }
+    
+    /**
+     * Set service identifier for distinguishing multiple instances
+     */
+    public void setServiceId(String serviceId) {
+        this.serviceId = serviceId;
+    }
+    
+    /**
+     * Get service identifier
+     */
+    public String getServiceId() {
+        return serviceId;
+    }
+    
+    /**
+     * Set bind host (e.g., 127.0.0.1 or 0.0.0.0)
+     */
+    public void setBindHost(String bindHost) {
+        this.bindHost = bindHost;
+    }
+    
+    /**
+     * Get bind host
+     */
+    public String getBindHost() {
+        return bindHost;
     }
 
     /**
