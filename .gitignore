@@ -4,5 +4,7 @@
 build/classes
 build/generated
 build/tmp
+build/reports
+build/resources
 bin
 
