@@ -3,10 +3,10 @@ ExtensionType: 1
 Name: Proxy Rotate
 RepoName: proxy-rotate
 ScreenVersion: 1.0.1
-SerialVersion: 8
+SerialVersion: 9
 MinPlatformVersion: 27
 ProOnly: False
-Author: slicingmelon
+Author: Petru Surugiu
 ShortDescription: Routes each HTTP request from Burp through a random proxy from a list.
 EntryPoint: target_repo-1.0.1.jar
 BuildCommand: ./gradlew clean build
